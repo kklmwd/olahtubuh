@@ -32,7 +32,7 @@
     padding: 20px 16px 12px; position: sticky; top: 0; background: var(--bg);
     z-index: 5; border-bottom: 1px solid var(--border);
   }
-  header h1 { font-size: 18px; margin: 0 0 12px; font-weight: 600; letter-spacing: 0.2px; }
+  header h1 { font-size: 18px; margin: 0 0 4px; font-weight: 600; letter-spacing: 0.2px; }
   .tabs { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
   .tab {
     flex: none; padding: 8px 14px; border-radius: 999px; background: var(--surface);
@@ -151,7 +151,6 @@
 
 <header>
   <h1>Olahtubuh</h1>
-  <div class="tabs" id="tabs"></div>
   <div class="view-toggle">
     <button id="btnLog" class="active">Log</button>
     <button id="btnEdit">Edit</button>
@@ -169,18 +168,6 @@
   </div>
 
   <div id="editView" style="display:none">
-    <div class="edit-card">
-      <div class="edit-row">
-        <div class="edit-field">
-          <label>Day name</label>
-          <input type="text" id="dayName" autocomplete="off">
-        </div>
-      </div>
-      <div class="day-actions">
-        <button id="addDayBtn">+ Add day</button>
-        <button id="delDayBtn" class="danger">Delete day</button>
-      </div>
-    </div>
     <div id="editList"></div>
     <button class="add-ex-btn" id="addExBtn">+ Add exercise</button>
   </div>
@@ -221,7 +208,8 @@
 <datalist id="exNames"></datalist>
 
 <script>
-const KEYS = { plan: "olahtubuh_plan_v1", draft: "olahtubuh_draft_v1", history: "ppl_log_history_v1" };
+const KEYS = { plan: "olahtubuh_plan_v2", draft: "olahtubuh_draft_v2", history: "ppl_log_history_v1" };
+const OLD_KEYS = { plan: "olahtubuh_plan_v1", draft: "olahtubuh_draft_v1" };
 const $ = id => document.getElementById(id);
 const uid = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-3);
 const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -256,20 +244,39 @@ function fmtNum(v) { return Number.isInteger(v) ? String(v) : v.toFixed(1); }
 function fmtLabel(iso) { const [, m, d] = iso.split("-"); return `${+d} ${MONTHS[+m - 1]}`; }
 
 /* ---------- state ---------- */
-function defaultPlan() { return { days: ["Chest", "Back", "Legs", "Abs", "Lifting"].map(n => ({ id: uid(), name: n, exercises: [] })) }; }
-let plan = read(KEYS.plan, null);
-if (!plan || !Array.isArray(plan.days) || !plan.days.length) { plan = defaultPlan(); write(KEYS.plan, plan); }
-// One-time: add the "Lifting" tab for installs that already have a saved plan.
-// The flag keeps it from coming back if you delete it later.
-if (!read("olahtubuh_lifting_added", false)) {
-  if (!plan.days.some(d => norm(d.name) === "lifting")) { plan.days.push({ id: uid(), name: "Lifting", exercises: [] }); write(KEYS.plan, plan); }
-  write("olahtubuh_lifting_added", true);
+// One flat workout list. Old per-day plans are merged into it once; the old keys are left untouched as a backup.
+function collapsePlan(p) {
+  const ex = [];
+  if (p && Array.isArray(p.days)) p.days.forEach(d => (d.exercises || []).forEach(e => ex.push(e)));
+  return { days: [{ id: uid(), name: "Workout", exercises: ex }] };
 }
-let draft = read(KEYS.draft, { days: {} });
-if (!draft || typeof draft.days !== "object" || !draft.days) draft = { days: {} };
+let plan = read(KEYS.plan, null);
+if (!plan || !Array.isArray(plan.days) || !plan.days.length) {
+  plan = collapsePlan(read(OLD_KEYS.plan, null));
+  write(KEYS.plan, plan);
+}
+if (plan.days.length > 1) { plan = collapsePlan(plan); write(KEYS.plan, plan); }
+let draft = read(KEYS.draft, null);
+if (!draft || typeof draft.days !== "object" || !draft.days) {
+  draft = { days: {} };
+  const old = read(OLD_KEYS.draft, null);
+  if (old && old.days) {
+    const merged = { date: todayStr(), startedAt: null, sets: {} };
+    let any = false;
+    Object.values(old.days).forEach(d => {
+      if (!d) return;
+      Object.assign(merged.sets, d.sets || {});
+      if (d.startedAt && (!merged.startedAt || d.startedAt < merged.startedAt)) merged.startedAt = d.startedAt;
+      if (d.date) merged.date = d.date;
+      any = true;
+    });
+    if (any) draft.days[plan.days[0].id] = merged;
+  }
+  write(KEYS.draft, draft);
+}
 Object.keys(draft.days).forEach(id => { if (!plan.days.some(d => d.id === id)) delete draft.days[id]; });
 
-let currentDayId = plan.days[0].id;
+const currentDayId = plan.days[0].id;
 let histTab = "entries";
 let metric = "top";
 
@@ -346,19 +353,6 @@ function refreshDatalist() {
   $("exNames").innerHTML = Array.from(names).sort().map(n => `<option value="${esc(n)}"></option>`).join("");
 }
 
-/* ---------- tabs ---------- */
-function renderTabs() {
-  $("tabs").innerHTML = plan.days.map(d =>
-    `<button class="tab ${d.id === currentDayId ? "active" : ""}" data-day="${esc(d.id)}">${esc(d.name || "Day")}</button>`
-  ).join("");
-}
-$("tabs").addEventListener("click", e => {
-  const b = e.target.closest(".tab"); if (!b) return;
-  currentDayId = b.dataset.day;
-  renderTabs();
-  if ($("editView").style.display !== "none") renderEdit(); else renderLog();
-});
-
 /* ---------- log view ---------- */
 function renderLog() {
   const day = currentDay();
@@ -366,7 +360,7 @@ function renderLog() {
   if (!hasData(d) && !d.startedAt && d.date !== todayStr()) d.date = todayStr();
   $("dateInput").value = d.date;
   if (!day.exercises.length) {
-    $("exerciseList").innerHTML = `<div class="empty">No exercises in ${esc(day.name)} yet.<br><button class="primary-link" id="goEdit">Add exercises</button></div>`;
+    $("exerciseList").innerHTML = `<div class="empty">No exercises yet.<br><button class="primary-link" id="goEdit">Add exercises</button></div>`;
     $("goEdit").onclick = () => showView("edit");
     updateTimer();
     return;
@@ -432,7 +426,7 @@ $("dateInput").addEventListener("change", () => {
 });
 $("clearBtn").onclick = () => {
   const day = currentDay();
-  if (!confirm(`Clear the ${day.name} log and reset its timer?`)) return;
+  if (!confirm(`Clear the current log and reset the timer?`)) return;
   delete draft.days[day.id];
   saveDraft();
   renderLog();
@@ -464,7 +458,7 @@ $("saveBtn").onclick = () => {
   if (!exercises.length) { alert("Log at least one set before saving."); return; }
   const duration = d.startedAt ? Math.max(1, Math.round((Date.now() - d.startedAt) / 1000)) : null;
   const hist = loadHistory();
-  hist.unshift({ id: uid(), date: d.date || todayStr(), day: day.name, exercises, duration });
+  hist.unshift({ id: uid(), date: d.date || todayStr(), day: "Workout", exercises, duration });
   if (!write(KEYS.history, hist)) return;
   delete draft.days[day.id];
   saveDraft();
@@ -477,7 +471,6 @@ $("saveBtn").onclick = () => {
 /* ---------- edit view ---------- */
 function renderEdit() {
   const day = currentDay();
-  $("dayName").value = day.name;
   $("editList").innerHTML = day.exercises.map(ex => `
     <div class="edit-card" data-ex="${esc(ex.id)}">
       <div class="edit-row">
@@ -501,15 +494,6 @@ function renderEdit() {
       </div>
     </div>`).join("");
 }
-$("dayName").addEventListener("input", () => {
-  currentDay().name = $("dayName").value;
-  savePlan();
-  renderTabs();
-});
-$("dayName").addEventListener("blur", () => {
-  const day = currentDay();
-  if (!day.name.trim()) { day.name = "Day"; $("dayName").value = day.name; savePlan(); renderTabs(); }
-});
 $("editList").addEventListener("input", e => {
   const card = e.target.closest(".edit-card"); if (!card) return;
   const day = currentDay();
@@ -560,29 +544,6 @@ $("addExBtn").onclick = () => {
   const inputs = $("editList").querySelectorAll('input[data-field="name"]');
   if (inputs.length) inputs[inputs.length - 1].focus();
 };
-$("addDayBtn").onclick = () => {
-  const day = { id: uid(), name: "New day", exercises: [] };
-  plan.days.push(day);
-  currentDayId = day.id;
-  savePlan();
-  renderTabs();
-  renderEdit();
-  $("dayName").focus();
-  $("dayName").select();
-};
-$("delDayBtn").onclick = () => {
-  if (plan.days.length <= 1) { alert("Keep at least one day."); return; }
-  const day = currentDay();
-  if (!confirm(`Delete ${day.name} and its exercises? Saved history is not affected.`)) return;
-  plan.days = plan.days.filter(d => d.id !== day.id);
-  delete draft.days[day.id];
-  currentDayId = plan.days[0].id;
-  savePlan();
-  saveDraft();
-  renderTabs();
-  renderEdit();
-};
-
 /* ---------- history ---------- */
 function renderHistory() {
   const hist = loadHistory();
@@ -723,7 +684,7 @@ $("importFile").onchange = e => {
       write(KEYS.history, existing.concat(incoming.filter(h => !ids.has(String(h.id)))));
       const planEmpty = plan.days.every(d => !d.exercises.length);
       if (!Array.isArray(data) && data.plan && Array.isArray(data.plan.days) && data.plan.days.length && planEmpty) {
-        plan = data.plan; currentDayId = plan.days[0].id; savePlan(); renderTabs();
+        plan = collapsePlan(data.plan); savePlan();
       }
       refreshDatalist();
       renderHistory();
@@ -745,7 +706,6 @@ function showView(name) {
   $("editView").style.display = name === "edit" ? "block" : "none";
   $("historyView").style.display = name === "history" ? "block" : "none";
   $("saveBar").style.display = name === "log" ? "block" : "none";
-  $("tabs").style.display = name === "history" ? "none" : "flex";
   if (name === "log") renderLog();
   if (name === "edit") renderEdit();
   if (name === "history") showHist(histTab);
@@ -756,7 +716,6 @@ $("btnHistory").onclick = () => showView("history");
 
 /* ---------- init ---------- */
 refreshDatalist();
-renderTabs();
 showView("log");
 try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {}); } catch (e) {}
 if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
