@@ -256,9 +256,15 @@ function fmtNum(v) { return Number.isInteger(v) ? String(v) : v.toFixed(1); }
 function fmtLabel(iso) { const [, m, d] = iso.split("-"); return `${+d} ${MONTHS[+m - 1]}`; }
 
 /* ---------- state ---------- */
-function defaultPlan() { return { days: ["Chest", "Back", "Legs", "Abs"].map(n => ({ id: uid(), name: n, exercises: [] })) }; }
+function defaultPlan() { return { days: ["Chest", "Back", "Legs", "Abs", "Lifting"].map(n => ({ id: uid(), name: n, exercises: [] })) }; }
 let plan = read(KEYS.plan, null);
 if (!plan || !Array.isArray(plan.days) || !plan.days.length) { plan = defaultPlan(); write(KEYS.plan, plan); }
+// One-time: add the "Lifting" tab for installs that already have a saved plan.
+// The flag keeps it from coming back if you delete it later.
+if (!read("olahtubuh_lifting_added", false)) {
+  if (!plan.days.some(d => norm(d.name) === "lifting")) { plan.days.push({ id: uid(), name: "Lifting", exercises: [] }); write(KEYS.plan, plan); }
+  write("olahtubuh_lifting_added", true);
+}
 let draft = read(KEYS.draft, { days: {} });
 if (!draft || typeof draft.days !== "object" || !draft.days) draft = { days: {} };
 Object.keys(draft.days).forEach(id => { if (!plan.days.some(d => d.id === id)) delete draft.days[id]; });
