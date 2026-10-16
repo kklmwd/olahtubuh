@@ -1,4 +1,4 @@
-const CACHE = "olahtubuh-v10";
+const CACHE = "olahtubuh-v12";
 const ASSETS = ["./", "./index.html", "./manifest.json", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", (e) => {

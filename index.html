@@ -121,6 +121,22 @@
     border-color: var(--accent); box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
   }
   body.is-dragging { user-select: none; -webkit-user-select: none; cursor: grabbing; }
+  .bw-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 12px 14px; margin-bottom: 10px; }
+  .bw-card.needs { border-color: var(--accent-dim); }
+  .bw-main { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .bw-title { font-size: 14px; font-weight: 600; }
+  .bw-note { font-size: 11px; color: var(--text-dim); margin-top: 2px; line-height: 1.4; }
+  .bw-input { display: flex; align-items: center; gap: 6px; flex: none; color: var(--text-dim); font-size: 12px; }
+  .bw-input input {
+    width: 84px; padding: 8px 6px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--surface2); color: var(--text); font-size: 14px; text-align: center; font-family: inherit;
+  }
+  .bw-input input:focus { outline: none; border-color: var(--accent-dim); }
+  .edit-row label.bw-toggle { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text); margin: 0; width: 100%; }
+  .bw-toggle input { width: 18px; height: 18px; accent-color: var(--accent); flex: none; margin: 0; }
+  .bw-toggle small { color: var(--text-dim); font-size: 10px; margin-left: auto; text-align: right; }
+  .chip.dim { color: var(--text-dim); }
+  .history-entry .hd { flex-wrap: wrap; row-gap: 4px; }
   .edit-hint { font-size: 11px; color: var(--text-dim); margin: 0 2px 10px; }
   .day-actions { display: flex; gap: 8px; margin-top: 10px; }
   .day-actions button {
@@ -146,7 +162,10 @@
     background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
     padding: 14px 10px; margin-bottom: 10px; overflow-x: auto;
   }
-  .chart-card svg { width: 100%; height: auto; display: block; }
+  .chart-card svg { display: block; max-width: none; }
+  .chart-split { display: flex; overflow: hidden; }
+  .chart-y { flex: none; }
+  .chart-scroll { flex: 1; min-width: 0; overflow-x: auto; }
   .chart-axis-label { fill: var(--text-dim); font-size: 9px; font-family: inherit; }
   .chart-grid { stroke: var(--border); stroke-width: 1; }
   .chart-line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; }
@@ -175,6 +194,15 @@
       <span>Date <input type="date" id="dateInput"></span>
       <button class="link-btn" id="clearBtn">Clear log</button>
     </div>
+    <div class="bw-card" id="bwCard">
+      <div class="bw-main">
+        <div>
+          <div class="bw-title">Bodyweight</div>
+          <div class="bw-note" id="bwNote"></div>
+        </div>
+        <div class="bw-input"><input type="number" inputmode="decimal" step="0.1" min="0" id="bwInput" aria-label="Bodyweight in kg"><span>kg</span></div>
+      </div>
+    </div>
     <div id="exerciseList"></div>
   </div>
 
@@ -189,6 +217,7 @@
       <button id="hEntries" class="active">Entries</button>
       <button id="hProgress">Progress</button>
       <button id="hSessions">Sessions</button>
+      <button id="hBody">Body</button>
     </div>
     <div id="entriesPane">
       <div class="toolbar">
@@ -208,6 +237,9 @@
     </div>
     <div id="sessionsPane" style="display:none">
       <div id="sessionsChart"></div>
+    </div>
+    <div id="bodyPane" style="display:none">
+      <div id="bodyChart"></div>
     </div>
   </div>
 </main>
@@ -298,7 +330,7 @@ const loadHistory = () => { const h = read(KEYS.history, []); return Array.isArr
 const currentDay = () => plan.days.find(d => d.id === currentDayId) || plan.days[0];
 
 function dayDraft(dayId) {
-  if (!draft.days[dayId]) draft.days[dayId] = { date: todayStr(), startedAt: null, sets: {} };
+  if (!draft.days[dayId]) draft.days[dayId] = { date: todayStr(), startedAt: null, sets: {}, bw: "" };
   return draft.days[dayId];
 }
 function hasData(d) {
@@ -323,19 +355,48 @@ function exerciseIndex() {
   chrono().forEach(h => (h.exercises || []).forEach(ex => m.set(norm(ex.name), ex.name)));
   return Array.from(m.entries()).sort((a, b) => a[1].localeCompare(b[1]));
 }
-function topOf(sets) {
-  let best = null;
-  sets.forEach(s => {
-    const w = parseFloat(s.w);
-    if (!isNaN(w) && w > 0 && (!best || w > best.w)) best = { w, r: s.r };
+function numOf(v) { const n = parseFloat(v); return isNaN(n) ? null : n; }
+// Real load of each counted set. Bodyweight exercises: bodyweight + added weight (added may be blank or negative).
+function exLoads(ex, bodyweight) {
+  const bwv = numOf(bodyweight);
+  const bw = bwv !== null && bwv > 0 ? bwv : 0;
+  const out = [];
+  (ex.sets || []).forEach(s => {
+    const w = numOf(s.w), r = numOf(s.r), reps = r !== null && r > 0 ? r : 0;
+    let load;
+    if (ex.bw) {
+      if (!reps && !s.done && w === null) return;
+      load = bw + (w || 0);
+    } else {
+      if (w === null || !(w > 0)) return;
+      load = w;
+    }
+    if (load > 0) out.push({ load, reps, w: s.w, r: s.r });
   });
-  return best;
+  return out;
+}
+// Most recent bodyweight on or before a date (entered or carried forward from an earlier session).
+function lastBodyweight(onOrBefore) {
+  const list = chrono();
+  for (let i = list.length - 1; i >= 0; i--) {
+    const h = list[i];
+    if (onOrBefore && String(h.date) > onOrBefore) continue;
+    const v = numOf(h.bodyweight);
+    if (v !== null && v > 0) return { value: v, date: h.date };
+  }
+  return null;
 }
 function lastTop(name) {
   const key = norm(name);
   for (const h of loadHistory()) {
     const ex = (h.exercises || []).find(e => norm(e.name) === key);
-    if (ex) { const t = topOf(ex.sets || []); if (t) return t; }
+    if (!ex) continue;
+    let best = null;
+    (ex.sets || []).forEach(set => {
+      const one = exLoads({ bw: ex.bw, sets: [set] }, h.bodyweight)[0];
+      if (one && (!best || one.load > best.load)) best = { load: one.load, w: set.w, r: set.r, bw: !!ex.bw };
+    });
+    if (best) return best;
   }
   return null;
 }
@@ -344,19 +405,27 @@ function progressPoints(key, kind) {
   chrono().forEach(h => {
     const ex = (h.exercises || []).find(e => norm(e.name) === key);
     if (!ex) return;
+    const loads = exLoads(ex, h.bodyweight);
     let value = 0;
-    if (kind === "top") {
-      const t = topOf(ex.sets || []);
-      if (t) value = t.w;
-    } else {
-      (ex.sets || []).forEach(s => {
-        const w = parseFloat(s.w), r = parseFloat(s.r);
-        if (!isNaN(w) && !isNaN(r) && w > 0 && r > 0) value += w * r;
-      });
-    }
+    if (kind === "top") value = loads.length ? Math.max(...loads.map(l => l.load)) : 0;
+    else loads.forEach(l => { value += l.load * l.reps; });
     if (value > 0) pts.push({ label: fmtLabel(h.date), value });
   });
   return pts;
+}
+function isBodyweightExercise(key) {
+  return chrono().some(h => (h.exercises || []).some(e => norm(e.name) === key && e.bw));
+}
+function addedText(w) {
+  const a = numOf(w) || 0;
+  return a ? `BW ${a > 0 ? "+" : "-"} ${fmtNum(Math.abs(a))}` : "BW";
+}
+function setText(ex, s, bodyweight) {
+  const reps = esc(s.r || "-");
+  if (!ex.bw) return `${esc(s.w || "-")} kg x ${reps}`;
+  const bwv = numOf(bodyweight);
+  const tag = addedText(s.w);
+  return (bwv > 0 ? `${fmtNum(bwv + (numOf(s.w) || 0))} kg (${tag})` : tag) + ` x ${reps}`;
 }
 function refreshDatalist() {
   const names = new Set();
@@ -366,11 +435,38 @@ function refreshDatalist() {
 }
 
 /* ---------- log view ---------- */
+function planHasBw() { return plan.days.some(day => day.exercises.some(e => e.bw)); }
+function currentBW(d) {
+  const entered = numOf(d.bw);
+  if (entered !== null && entered > 0) return entered;
+  const last = lastBodyweight(d.date || todayStr());
+  return last ? last.value : null;
+}
+function bwLoadText(d) {
+  const v = currentBW(d);
+  return v ? `load = ${fmtNum(v)} kg + added` : "bodyweight not set";
+}
+function renderBW(d) {
+  const entered = numOf(d.bw);
+  const has = entered !== null && entered > 0;
+  const last = lastBodyweight(d.date || todayStr());
+  const inp = $("bwInput");
+  if (document.activeElement !== inp) inp.value = d.bw || "";
+  inp.placeholder = last ? fmtNum(last.value) : "kg";
+  let note;
+  if (has) note = "Saved with this session.";
+  else if (last) note = `Using ${fmtNum(last.value)} kg from ${fmtLabel(last.date)} unless you enter a new weight.`;
+  else note = "Not set yet. Needed to count bodyweight exercises.";
+  $("bwNote").textContent = note;
+  $("bwCard").classList.toggle("needs", !has && !last && planHasBw());
+  document.querySelectorAll(".bw-load").forEach(el => { el.textContent = bwLoadText(d); });
+}
 function renderLog() {
   const day = currentDay();
   const d = ensureSets(day);
   if (!hasData(d) && !d.startedAt && d.date !== todayStr()) d.date = todayStr();
   $("dateInput").value = d.date;
+  renderBW(d);
   if (!day.exercises.length) {
     $("exerciseList").innerHTML = `<div class="empty">No exercises yet.<br><button class="primary-link" id="goEdit">Add exercises</button></div>`;
     $("goEdit").onclick = () => showView("edit");
@@ -380,11 +476,12 @@ function renderLog() {
   $("exerciseList").innerHTML = day.exercises.map(ex => {
     const sets = d.sets[ex.id];
     const last = lastTop(ex.name);
-    const meta = [`${ex.sets} sets`, (ex.reps || "").trim() ? `${esc(ex.reps)} reps` : null, last ? `last ${fmtNum(last.w)} kg${last.r ? " x " + esc(last.r) : ""}` : null].filter(Boolean).join(" &middot; ");
+    const lastTxt = !last ? null : "last " + (last.bw ? addedText(last.w) : fmtNum(numOf(last.w)) + " kg") + (last.r ? " x " + esc(last.r) : "");
+    const meta = [`${ex.sets} sets`, (ex.reps || "").trim() ? `${esc(ex.reps)} reps` : null, ex.bw ? `<span class="bw-load">${bwLoadText(d)}</span>` : null, lastTxt].filter(Boolean).join(" &middot; ");
     const rows = sets.map((s, i) => `
       <div class="set-row" data-ex="${esc(ex.id)}" data-i="${i}">
         <div class="idx">${i + 1}</div>
-        <input type="number" inputmode="decimal" placeholder="kg" value="${esc(s.w)}" data-field="w">
+        <input type="number" inputmode="decimal" placeholder="${ex.bw ? "+kg" : "kg"}" value="${esc(s.w)}" data-field="w">
         <input type="number" inputmode="numeric" placeholder="reps" value="${esc(s.r)}" data-field="r">
         <button class="done ${s.done ? "checked" : ""}" aria-label="Mark set done"></button>
       </div>`).join("");
@@ -433,8 +530,16 @@ $("exerciseList").addEventListener("click", e => {
 });
 $("dateInput").addEventListener("change", () => {
   if (!$("dateInput").value) return;
-  dayDraft(currentDay().id).date = $("dateInput").value;
+  const d = dayDraft(currentDay().id);
+  d.date = $("dateInput").value;
   saveDraft();
+  renderBW(d);
+});
+$("bwInput").addEventListener("input", () => {
+  const d = dayDraft(currentDay().id);
+  d.bw = $("bwInput").value;
+  saveDraft();
+  renderBW(d);
 });
 $("clearBtn").onclick = () => {
   const day = currentDay();
@@ -463,14 +568,28 @@ setInterval(updateTimer, 1000);
 $("saveBtn").onclick = () => {
   const day = currentDay();
   const d = dayDraft(day.id);
-  const exercises = day.exercises.map(ex => ({
-    name: exName(ex),
-    sets: (d.sets[ex.id] || []).filter(s => s.w !== "" || s.r !== "" || s.done).map(s => ({ w: s.w, r: s.r, done: s.done }))
-  })).filter(ex => ex.sets.length > 0);
+  const exercises = day.exercises.map(ex => {
+    const out = {
+      name: exName(ex),
+      sets: (d.sets[ex.id] || []).filter(s => s.w !== "" || s.r !== "" || s.done).map(s => ({ w: s.w, r: s.r, done: s.done }))
+    };
+    if (ex.bw) out.bw = true;
+    return out;
+  }).filter(ex => ex.sets.length > 0);
   if (!exercises.length) { alert("Log at least one set before saving."); return; }
+  const date = d.date || todayStr();
+  // bodyweight: what was entered, otherwise carry over the previous one
+  const entered = numOf(d.bw);
+  const hasEntered = entered !== null && entered > 0;
+  const prevBw = lastBodyweight(date);
+  const bodyweight = hasEntered ? entered : (prevBw ? prevBw.value : null);
+  if (exercises.some(e => e.bw) && !bodyweight &&
+      !confirm("No bodyweight entered yet, so bodyweight exercises will only count the added weight. Save anyway?")) return;
   const duration = d.startedAt ? Math.max(1, Math.round((Date.now() - d.startedAt) / 1000)) : null;
   const hist = loadHistory();
-  hist.unshift({ id: uid(), date: d.date || todayStr(), day: "Workout", exercises, duration });
+  const entry = { id: uid(), date, day: "Workout", exercises, duration, bodyweight: bodyweight || null };
+  if (bodyweight && !hasEntered) entry.bwAssumed = true;
+  hist.unshift(entry);
   if (!write(KEYS.history, hist)) return;
   delete draft.days[day.id];
   saveDraft();
@@ -506,6 +625,9 @@ function renderEdit() {
         </div>
         <button class="icon-btn danger" data-act="del" aria-label="Remove">&times;</button>
       </div>
+      <div class="edit-row">
+        <label class="bw-toggle"><input type="checkbox" data-field="bw" ${ex.bw ? "checked" : ""}><span>Bodyweight exercise</span><small>weight field = added kg</small></label>
+      </div>
     </div>`).join("");
 }
 $("editList").addEventListener("input", e => {
@@ -528,10 +650,19 @@ $("editList").addEventListener("input", e => {
     saveDraft();
   } else if (field === "name" || field === "reps") {
     ex[field] = e.target.value;
+  } else if (field === "bw") {
+    ex.bw = e.target.checked;
   }
   savePlan();
 });
-$("editList").addEventListener("change", refreshDatalist);
+$("editList").addEventListener("change", e => {
+  if (e.target.dataset && e.target.dataset.field === "bw") {
+    const card = e.target.closest(".edit-card");
+    const ex = card && currentDay().exercises.find(x => x.id === card.dataset.ex);
+    if (ex) { ex.bw = e.target.checked; savePlan(); }
+  }
+  refreshDatalist();
+});
 $("editList").addEventListener("click", e => {
   const btn = e.target.closest("[data-act]"); if (!btn) return;
   const day = currentDay();
@@ -653,12 +784,12 @@ function renderHistory() {
     <div class="history-entry">
       <div class="hd">
         <span>${esc(h.date)}</span>
-        <span>${h.duration ? `<span class="chip">${fmtDur(h.duration)}</span> ` : ""}<span class="day-tag">${esc(h.day)}</span></span>
+        <span>${numOf(h.bodyweight) > 0 ? `<span class="chip${h.bwAssumed ? " dim" : ""}">BW ${fmtNum(numOf(h.bodyweight))} kg${h.bwAssumed ? " (assumed)" : ""}</span> ` : ""}${h.duration ? `<span class="chip">${fmtDur(h.duration)}</span> ` : ""}<span class="day-tag">${esc(h.day)}</span></span>
       </div>
       <table>
         ${(h.exercises || []).map(ex => `
           <tr><td colspan="2" style="padding-top:6px;font-weight:600">${esc(ex.name)}</td></tr>
-          ${(ex.sets || []).map(s => `<tr><td style="color:var(--text-dim)">Set</td><td>${esc(s.w || "-")} kg x ${esc(s.r || "-")} ${s.done ? "&#10003;" : ""}</td></tr>`).join("")}
+          ${(ex.sets || []).map(s => `<tr><td style="color:var(--text-dim)">Set</td><td>${setText(ex, s, h.bodyweight)} ${s.done ? "&#10003;" : ""}</td></tr>`).join("")}
         `).join("")}
       </table>
       <button class="del" data-id="${esc(h.id)}">Delete</button>
@@ -671,35 +802,42 @@ $("historyList").addEventListener("click", e => {
   renderHistory();
 });
 
+// The weight scale (left) is its own fixed column; only the plot scrolls sideways, so the scale stays visible
+// however many sessions there are. Plot is drawn 1:1 in pixels so text never shrinks.
 function buildChart(points, fmtY) {
   const n = points.length;
-  const h = 240, padL = 42, padR = 14, padT = 18, padB = 32;
-  const w = Math.max(340, n * 46 + padL + padR);
-  const cw = w - padL - padR, ch = h - padT - padB;
+  const h = 240, padT = 18, padB = 32, yW = 38, padX = 20;
+  const mainW = (document.querySelector("main").clientWidth || 390) - 32;
+  const avail = Math.max(200, mainW - 22 - yW); // card padding 2 x 10 + border 2 x 1
+  const plotW = Math.max(avail, n * 36 + padX * 2);
+  const ch = h - padT - padB;
   const vals = points.map(p => p.value);
   let lo = Math.min(...vals), hi = Math.max(...vals);
   if (lo === hi) { lo -= 5; hi += 5; }
   const pad = (hi - lo) * 0.12; lo = Math.max(0, lo - pad); hi += pad;
-  const x = i => n > 1 ? padL + (i * cw) / (n - 1) : padL + cw / 2;
+  const x = i => n > 1 ? padX + (i * (plotW - padX * 2)) / (n - 1) : plotW / 2;
   const y = v => padT + ch - ((v - lo) / (hi - lo)) * ch;
-  let svg = "";
+  let grid = "", ylab = "", plot = "";
   for (let i = 0; i <= 4; i++) {
     const v = lo + ((hi - lo) * i) / 4, yy = y(v);
-    svg += `<line class="chart-grid" x1="${padL}" y1="${yy}" x2="${w - padR}" y2="${yy}"/>`;
-    svg += `<text class="chart-axis-label" x="${padL - 6}" y="${yy + 3}" text-anchor="end">${fmtY(v, hi - lo)}</text>`;
+    grid += `<line class="chart-grid" x1="0" y1="${yy}" x2="${plotW}" y2="${yy}"/>`;
+    ylab += `<text class="chart-axis-label" x="${yW - 6}" y="${yy + 3}" text-anchor="end">${fmtY(v, hi - lo)}</text>`;
   }
-  svg += `<path class="chart-line" d="${points.map((p, i) => `${i ? "L" : "M"}${x(i)},${y(p.value)}`).join(" ")}"/>`;
+  plot += `<path class="chart-line" d="${points.map((p, i) => `${i ? "L" : "M"}${x(i)},${y(p.value)}`).join(" ")}"/>`;
   points.forEach((p, i) => {
-    svg += `<circle class="chart-point" cx="${x(i)}" cy="${y(p.value)}" r="3.5"/>`;
-    svg += `<text class="chart-value" x="${x(i)}" y="${y(p.value) - 9}">${fmtNum(Math.round(p.value * 10) / 10)}</text>`;
-    svg += `<text class="chart-axis-label" x="${x(i)}" y="${h - 10}" text-anchor="middle">${esc(p.label)}</text>`;
+    plot += `<circle class="chart-point" cx="${x(i)}" cy="${y(p.value)}" r="3.5"/>`;
+    plot += `<text class="chart-value" x="${x(i)}" y="${y(p.value) - 9}">${fmtNum(Math.round(p.value * 10) / 10)}</text>`;
+    plot += `<text class="chart-axis-label" x="${x(i)}" y="${h - 10}" text-anchor="middle">${esc(p.label)}</text>`;
   });
-  return `<div class="chart-card"><svg viewBox="0 0 ${w} ${h}" style="min-width:${w <= 360 ? 0 : w}px" xmlns="http://www.w3.org/2000/svg">${svg}</svg></div>`;
+  return `<div class="chart-card chart-split">` +
+    `<svg class="chart-y" width="${yW}" height="${h}" viewBox="0 0 ${yW} ${h}" xmlns="http://www.w3.org/2000/svg">${ylab}</svg>` +
+    `<div class="chart-scroll"><svg class="chart-plot" width="${plotW}" height="${h}" viewBox="0 0 ${plotW} ${h}" xmlns="http://www.w3.org/2000/svg">${grid}${plot}</svg></div>` +
+    `</div>`;
 }
 function statsHTML(items) {
   return `<div class="chart-stats">${items.map(i => `<div class="chart-stat"><div class="v">${i.v}</div><div class="l">${i.l}</div></div>`).join("")}</div>`;
 }
-function scrollChartsToEnd() { document.querySelectorAll(".chart-card").forEach(c => { c.scrollLeft = c.scrollWidth; }); }
+function scrollChartsToEnd() { document.querySelectorAll(".chart-scroll").forEach(c => { c.scrollLeft = c.scrollWidth; }); }
 
 function renderProgress() {
   const idx = exerciseIndex();
@@ -718,12 +856,13 @@ function renderProgress() {
 function renderProgressChart() {
   const pts = progressPoints($("exerciseSelect").value, metric);
   if (!pts.length) {
-    $("progressChart").innerHTML = `<div class="empty">No weight logged for this exercise yet. Bodyweight-only sets are not charted.</div>`;
+    $("progressChart").innerHTML = `<div class="empty">Nothing to chart for this exercise yet.<br>Log a weight, or for bodyweight exercises enter your bodyweight on the Log page.</div>`;
     return;
   }
   const first = pts[0].value, last = pts[pts.length - 1].value, best = Math.max(...pts.map(p => p.value));
   const delta = last - first, unit = metric === "top" ? " kg" : "";
-  $("progressChart").innerHTML =
+  const bwNote = isBodyweightExercise($("exerciseSelect").value) ? `<div class="exercise-meta" style="margin:0 2px 8px">Bodyweight exercise: load = bodyweight + added weight.</div>` : "";
+  $("progressChart").innerHTML = bwNote +
     statsHTML([{ v: fmtNum(Math.round(last * 10) / 10) + unit, l: "Latest" }, { v: fmtNum(Math.round(best * 10) / 10) + unit, l: "Best" }, { v: (delta > 0 ? "+" : "") + fmtNum(Math.round(delta * 10) / 10) + unit, l: "Change" }]) +
     buildChart(pts, (v, range) => range < 6 ? v.toFixed(1) : String(Math.round(v)));
   scrollChartsToEnd();
@@ -743,21 +882,46 @@ function renderSessions() {
     buildChart(pts, (v, range) => range < 6 ? v.toFixed(1) : String(Math.round(v)));
   scrollChartsToEnd();
 }
+// Bodyweight over time: only weights you actually entered (assumed carry-overs are not new data).
+// If several sessions share a date, the latest one saved that day is used.
+function renderBody() {
+  const byDate = new Map();
+  chrono().forEach(h => {
+    const v = numOf(h.bodyweight);
+    if (v !== null && v > 0 && !h.bwAssumed) byDate.set(h.date, v);
+  });
+  const pts = Array.from(byDate.entries()).map(([date, value]) => ({ label: fmtLabel(date), value }));
+  if (!pts.length) {
+    $("bodyChart").innerHTML = `<div class="empty">No bodyweight entered yet.<br>Fill in the Bodyweight card on the Log page before saving a session.</div>`;
+    return;
+  }
+  const first = pts[0].value, last = pts[pts.length - 1].value, delta = last - first;
+  const r1 = v => fmtNum(Math.round(v * 10) / 10);
+  $("bodyChart").innerHTML =
+    statsHTML([{ v: r1(last) + " kg", l: "Latest" }, { v: r1(first) + " kg", l: "Start" }, { v: (delta > 0 ? "+" : "") + r1(delta) + " kg", l: "Change" }]) +
+    `<div class="exercise-meta" style="margin:0 2px 8px">Bodyweight (kg), entered values only</div>` +
+    buildChart(pts, (v, range) => range < 6 ? v.toFixed(1) : String(Math.round(v)));
+  scrollChartsToEnd();
+}
 function showHist(tab) {
   histTab = tab;
   $("hEntries").classList.toggle("active", tab === "entries");
   $("hProgress").classList.toggle("active", tab === "progress");
   $("hSessions").classList.toggle("active", tab === "sessions");
+  $("hBody").classList.toggle("active", tab === "body");
   $("entriesPane").style.display = tab === "entries" ? "block" : "none";
   $("progressPane").style.display = tab === "progress" ? "block" : "none";
   $("sessionsPane").style.display = tab === "sessions" ? "block" : "none";
+  $("bodyPane").style.display = tab === "body" ? "block" : "none";
   if (tab === "entries") renderHistory();
   if (tab === "progress") renderProgress();
   if (tab === "sessions") renderSessions();
+  if (tab === "body") renderBody();
 }
 $("hEntries").onclick = () => showHist("entries");
 $("hProgress").onclick = () => showHist("progress");
 $("hSessions").onclick = () => showHist("sessions");
+$("hBody").onclick = () => showHist("body");
 $("exerciseSelect").onchange = renderProgressChart;
 $("mTop").onclick = () => { metric = "top"; $("mTop").classList.add("active"); $("mVol").classList.remove("active"); renderProgressChart(); };
 $("mVol").onclick = () => { metric = "volume"; $("mVol").classList.add("active"); $("mTop").classList.remove("active"); renderProgressChart(); };
